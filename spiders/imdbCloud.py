@@ -1,10 +1,27 @@
 # -*- coding: utf-8 -*-
+import os
+import uuid
+from ssl import create_default_context
+
+import certifi
 import scrapy
 from scrapy import Request
+from elasticsearch import Elasticsearch
 from scrapy.exceptions import CloseSpider
 
-class IMDBSpider(scrapy.Spider):
-    name = 'imdb'
+ELASTIC_API_URL_HOST = os.environ['ELASTIC_API_URL_HOST']
+ELASTIC_API_URL_PORT = os.environ['ELASTIC_API_URL_PORT']
+ELASTIC_API_USERNAME = os.environ['ELASTIC_API_USERNAME']
+ELASTIC_API_PASSWORD = os.environ['ELASTIC_API_PASSWORD']
+
+es=Elasticsearch(host=ELASTIC_API_URL_HOST,
+                 port=ELASTIC_API_URL_PORT,
+                 scheme='https',
+                 http_auth=(ELASTIC_API_USERNAME,ELASTIC_API_PASSWORD)
+                 )
+
+class IMDBCloudSpider(scrapy.Spider):
+    name = 'imdbCloud'
     allowed_domains = ['www.imdb.com']
     start_urls = ['https://www.imdb.com/title/tt0096463/fullcredits/']
     actorsScrapped = []
@@ -22,11 +39,12 @@ class IMDBSpider(scrapy.Spider):
             return
         idMovie = titleSection.css(".parent").xpath("./h3/a/@href").get().split('/')[2]
         if idMovie in self.moviesScrapped:
-            yield  None
+            yield None
             return
-        movieYear = titleSection.css('.nobr').xpath('./text()').get().strip().replace(')','(').split('(')[1].split(' ')[0]
+        movieYear = \
+        titleSection.css('.nobr').xpath('./text()').get().strip().replace(')', '(').split('(')[1].split(' ')[0]
         if movieYear is None:
-            yield  None
+            yield None
             return
         if (int(movieYear) < 1980 or int(movieYear) > 1989):
             yield None
@@ -39,7 +57,7 @@ class IMDBSpider(scrapy.Spider):
             if self.documentscount >= 5000:
                 yield None
                 raise CloseSpider('Number of documents reached')
-            if (len(c.xpath('./td').getall()) <3):
+            if (len(c.xpath('./td').getall()) < 3):
                 continue;
             actorURL = c.xpath('./td/a/@href').get()
             actorId = actorURL.split('/')[2]
@@ -50,23 +68,27 @@ class IMDBSpider(scrapy.Spider):
 
             if actorURL is not None:
                 nextScrap.append({"url": self.allowed_domains[0] + actorURL, "id": actorId})
-            yield {"movie_id": idMovie,
-                     "movie_name": movieName,
-                     "movie_year": movieYear,
-                     "actor_name": actorName,
-                     "actor_id": actorId,
-                     "role_name": actorRole
-                     }
+            es.index(index="imdb",
+                     doc_type="movies",
+                     #id=uuid.uuid4(),
+                     id=idMovie+'-'+actorId,
+                     body={ "movie_id": idMovie,
+                            "movie_name": movieName,
+                            "movie_year": movieYear,
+                            "actor_name": actorName,
+                            "actor_id": actorId,
+                            "role_name": actorRole
+                            })
             self.documentscount = self.documentscount + 1
         self.moviesScrapped.append(idMovie)
         for a in nextScrap:
             if a['id'] not in self.actorsScrapped:
                 self.actorsScrapped.append(a['id'])
-                next_page = "https://"+a['url']
+                next_page = "https://" + a['url']
                 yield Request(next_page, callback=self.parse_artist)
 
     def parse_artist(self, response):
         filmography = response.css('.filmo-category-section').xpath('./div')
         for film in filmography:
-            next_page = self.allowed_domains[0]+film.xpath('./b/a/@href').get().split("?ref")[0]+'fullcredits/'
-            yield Request("https://"+next_page,callback=self.parse)
+            next_page = self.allowed_domains[0] + film.xpath('./b/a/@href').get().split("?ref")[0] + 'fullcredits/'
+            yield Request("https://" + next_page, callback=self.parse)
